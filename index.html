@@ -3374,6 +3374,23 @@ document.addEventListener('DOMContentLoaded',()=>{
     return loops.length>0 && !loops[loops.length-1].out;
   }
 
+  /* Format date stable across renders — avoid the en-PK→en-US flicker */
+  function fmtStableDate(){
+    // e.g. "Saturday, May 3, 2026" — single locale, single render path
+    return new Intl.DateTimeFormat('en-US',{
+      timeZone:PKT_TZ,weekday:'long',year:'numeric',month:'long',day:'numeric'
+    }).format(new Date());
+  }
+
+  /* Kill the original employee clock interval — we own the clock now,
+     this prevents the "PKT suffix flickering off every second" race. */
+  function killOriginalEmpClock(){
+    if(typeof empClockInterval !== 'undefined' && empClockInterval){
+      try{ clearInterval(empClockInterval); }catch(e){}
+    }
+    if(window.empClockInterval){ try{ clearInterval(window.empClockInterval); }catch(e){} }
+  }
+
   /* Update clock + buttons every second */
   function refreshClockUI(){
     const dispEl  = document.getElementById('empClockDisplay');
@@ -3383,8 +3400,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     const outBtn  = document.getElementById('empClockOutBtn');
     if(!dispEl) return; // not on attendance tab
 
-    dispEl.textContent = fmtPKT() + ' PKT';
-    if(dateEl) dateEl.textContent = fmtPKTDate();
+    killOriginalEmpClock();
+    dispEl.textContent = fmtPKT();              // (b) no " PKT" suffix
+    if(dateEl) dateEl.textContent = fmtStableDate(); // (b) single stable format
 
     const w = clockWindow();
     const open = hasOpenLoop();
@@ -3426,12 +3444,87 @@ document.addEventListener('DOMContentLoaded',()=>{
   const _origSwitchTab = window.switchTab;
   window.switchTab = function(id){
     _origSwitchTab(id);
-    if(id==='attendance') setTimeout(refreshClockUI,50);
+    if(id==='attendance'){ killOriginalEmpClock(); setTimeout(refreshClockUI,50); }
   };
 
-  /* ── Wrap original biometric handler with PKT window + double-punch gate ──
-     Preserves the FULL biometric (WebAuthn) flow from the original file —
-     we only add a pre-flight gate and post-success local loop recording. */
+  /* (c) Override processClockAction to send PKT time WITH SECONDS to backend.
+     Original sliced "HH:MM" — we send "HH:MM:SS" computed from Asia/Karachi. */
+  const _origProcessClockAction = window.processClockAction;
+  window.processClockAction = async function(type){
+    // Patch the global Date constructor briefly so original's
+    // `now.toTimeString().slice(0,5)` becomes our PKT "HH:MM:SS".
+    // Cleaner approach: replicate the original logic with PKT seconds.
+    const session = (typeof getSession==='function') ? getSession() : null;
+    if(!session || !session.employeeId) return;
+
+    const pkt = fmtPKT(); // "HH:MM:SS" in Asia/Karachi
+    // Date string in PKT (YYYY-MM-DD)
+    const dateStr = new Intl.DateTimeFormat('en-CA',{timeZone:PKT_TZ}).format(new Date());
+    const emp = (window.DASH && DASH.employees) ? DASH.employees.find(e=>e.id===session.employeeId) || {} : {};
+
+    let geoStr = '';
+    try{
+      const pos = await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:5000,maximumAge:60000}));
+      geoStr = pos.coords.latitude.toFixed(6)+','+pos.coords.longitude.toFixed(6);
+    }catch(e){}
+
+    if(type==='in'){
+      const btn = document.getElementById('empClockInBtn');
+      if(btn){ btn.disabled=true; btn.dataset.busy='1';
+        btn.innerHTML='<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite;font-size:32px"></i><span>Clocking In...</span>'; }
+      try{
+        const d = await apiPost({
+          action:'markAttendanceBiometric', type:'clockIn',
+          licenseKey:STATE.licenseKey, employeeId:session.employeeId,
+          employeeName: emp.name || session.employeeName || session.username,
+          department: emp.department || '',
+          date:dateStr, checkIn:pkt, status:'Present',
+          authMethod:'Fingerprint', geoLocation:geoStr, timezone:PKT_TZ
+        });
+        if(d.success){
+          window.todayCheckins = window.todayCheckins || {};
+          window.todayCheckins[session.employeeId] = { checkIn:pkt, checkOut:'', hours:0, status:'Present' };
+          // Record loop locally
+          const loops = getMyLoops(); loops.push({in:pkt, out:null}); setMyLoops(loops);
+          if(btn){ btn.innerHTML='<i class="ri-check-line" style="font-size:32px"></i><span>Clocked In</span>'; }
+          if(typeof updateEmpStats==='function') updateEmpStats(session.employeeId);
+          if(typeof loadAttendance==='function') loadAttendance();
+        } else {
+          alert(d.error||'Failed');
+        }
+      }catch(e){ alert('Network error'); }
+      finally{ if(btn){ btn.dataset.busy='0'; } setTimeout(refreshClockUI,50); }
+    } else {
+      const btn = document.getElementById('empClockOutBtn');
+      if(btn){ btn.disabled=true; btn.dataset.busy='1';
+        btn.innerHTML='<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite;font-size:32px"></i><span>Clocking Out...</span>'; }
+      try{
+        const d = await apiPost({
+          action:'markAttendanceBiometric', type:'clockOut',
+          licenseKey:STATE.licenseKey, employeeId:session.employeeId,
+          date:dateStr, checkOut:pkt, authMethod:'Fingerprint',
+          geoLocation:geoStr, totalHours:'', timezone:PKT_TZ
+        });
+        if(d.success){
+          window.todayCheckins = window.todayCheckins || {};
+          const ci = window.todayCheckins[session.employeeId] || {};
+          ci.checkOut = pkt; window.todayCheckins[session.employeeId] = ci;
+          const loops = getMyLoops();
+          if(loops.length && !loops[loops.length-1].out){
+            loops[loops.length-1].out = pkt; setMyLoops(loops);
+          }
+          if(btn){ btn.innerHTML='<i class="ri-check-line" style="font-size:32px"></i><span>Clocked Out</span>'; }
+          if(typeof updateEmpStats==='function') updateEmpStats(session.employeeId);
+          if(typeof loadAttendance==='function') loadAttendance();
+        } else {
+          alert(d.error||'Clock out failed.');
+        }
+      }catch(e){ alert('Network error: '+(e.message||'')); }
+      finally{ if(btn){ btn.dataset.busy='0'; } setTimeout(refreshClockUI,50); }
+    }
+  };
+
+  /* ── Wrap original biometric handler with PKT window + double-punch gate ── */
   const _origEmpBioClock = window.empBioClock;
   window.empBioClock = async function(type){
     const w = clockWindow();
@@ -3445,29 +3538,10 @@ document.addEventListener('DOMContentLoaded',()=>{
       if(!w.canClockOut){ alert('Clock Out window closed at 6:00 AM PKT.'); return; }
     }
 
-    // Snapshot today's checkins to detect success after biometric flow completes
-    const session = getSession();
-    const empId = session && session.employeeId;
-    const before = (window.todayCheckins && empId) ? Object.assign({}, window.todayCheckins[empId]||{}) : {};
-
-    // Run the original biometric (WebAuthn) flow — registration if needed, then verify, then API call
+    // Run the original biometric (WebAuthn) flow — our patched processClockAction
+    // handles loop recording on success.
     try{ await _origEmpBioClock(type); } catch(e){ console.error('biometric clock error', e); }
-
-    // After original flow, detect success via todayCheckins mutation and record local loop
-    setTimeout(()=>{
-      const after = (window.todayCheckins && empId) ? (window.todayCheckins[empId]||{}) : {};
-      const loops = getMyLoops();
-      if(type==='in' && after.checkIn && after.checkIn !== before.checkIn){
-        loops.push({in: after.checkIn, out: null});
-        setMyLoops(loops);
-      } else if(type==='out' && after.checkOut && after.checkOut !== before.checkOut){
-        if(loops.length && !loops[loops.length-1].out){
-          loops[loops.length-1].out = after.checkOut;
-          setMyLoops(loops);
-        }
-      }
-      refreshClockUI();
-    }, 600);
+    setTimeout(refreshClockUI, 700);
   };
 
   /* Auto-close any open loop at 06:00 PKT (auto_closed flag) */
@@ -3664,15 +3738,77 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
   };
 
-  /* Confirm Clear Session click + show loading */
-  const csb = document.getElementById('clearSessionBtn');
-  if(csb){
-    csb.onclick = function(){
-      if(!confirm('Clear your session and return to login?')) return;
-      csb.innerHTML = '<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite"></i> Clearing…';
-      setTimeout(()=>{ localStorage.clear(); location.reload(); }, 300);
-    };
+  /* ── (d) Mobile sidebar hamburger, Clear Session relocation, Setup hide ── */
+  function injectMobileChrome(){
+    // Hide setup-progress indicator (irrelevant per request)
+    const sp = document.getElementById('setupProgress');
+    if(sp) sp.style.display = 'none';
+
+    // Floating hamburger — visible on mobile in BOTH layouts (sidebar layout
+    // hides .dash-topbar entirely so the original toggle is unreachable).
+    if(!document.getElementById('mobileMenuBtn')){
+      const hb = document.createElement('button');
+      hb.id = 'mobileMenuBtn';
+      hb.setAttribute('aria-label','Open menu');
+      hb.innerHTML = '<i class="ri-menu-line"></i>';
+      hb.onclick = function(ev){
+        ev.stopPropagation();
+        const sb = document.getElementById('dashSidebar');
+        if(!sb) return;
+        sb.classList.toggle('open');
+        document.body.classList.toggle('sidebar-open', sb.classList.contains('open'));
+      };
+      document.body.appendChild(hb);
+    }
+
+    // Move Clear Session into sidebar footer; hide floating one
+    const sidebarFooter = document.querySelector('.dash-sidebar-footer');
+    const floating = document.getElementById('clearSessionBtn');
+    if(sidebarFooter && !document.getElementById('clearSessionBtnSidebar')){
+      const btn = document.createElement('button');
+      btn.id = 'clearSessionBtnSidebar';
+      btn.className = 'btn btn-ghost';
+      btn.style.cssText = 'width:100%;margin-top:10px;justify-content:center;color:rgb(239,68,68);border:1px solid rgba(239,68,68,.3)';
+      btn.innerHTML = '<i class="ri-delete-bin-line"></i> Clear Session';
+      btn.onclick = function(){
+        if(!confirm('Clear your session and return to login?')) return;
+        btn.innerHTML = '<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite"></i> Clearing…';
+        setTimeout(()=>{ localStorage.clear(); location.reload(); }, 300);
+      };
+      sidebarFooter.appendChild(btn);
+    }
+    if(floating) floating.style.display = 'none';
   }
+
+  const _origBuildNav = window.buildNav;
+  if(typeof _origBuildNav === 'function'){
+    window.buildNav = function(){ _origBuildNav.apply(this,arguments); setTimeout(injectMobileChrome,30); };
+  }
+  const _origInitDash = window.initDashboard;
+  if(typeof _origInitDash === 'function'){
+    window.initDashboard = function(){ _origInitDash.apply(this,arguments); setTimeout(injectMobileChrome,50); };
+  }
+  setInterval(injectMobileChrome, 2000); // safety net
+
+  const mobStyle = document.createElement('style');
+  mobStyle.textContent = `
+    #mobileMenuBtn{
+      display:none; position:fixed; top:14px; left:14px; z-index:9999;
+      width:44px; height:44px; border-radius:12px; border:none;
+      background:rgb(var(--bg-card)); color:rgb(var(--text-primary));
+      box-shadow:0 4px 14px rgba(0,0,0,.18); cursor:pointer;
+      font-size:22px; backdrop-filter:blur(10px);
+      align-items:center; justify-content:center;
+    }
+    @media (max-width: 768px){
+      #mobileMenuBtn{ display:flex !important; }
+      .dash-sidebar{ z-index:9998; }
+      .dash-content{ padding-top: 56px !important; }
+    }
+    #clearSessionBtn{ display:none !important; }
+    #setupProgress{ display:none !important; }
+  `;
+  document.head.appendChild(mobStyle);
 })();
 
 </script>
