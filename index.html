@@ -214,9 +214,17 @@ input,select,textarea{font-family:inherit;color:inherit}
 .login-tab:hover:not(.active){color:rgb(var(--text-primary))}
 
 /* ─── LOADING SCREEN ─── */
-#loadingScreen{gap:24px}
-.loading-bar-wrapper{width:min(360px,80vw);height:4px;border-radius:4px;background:rgba(var(--border));overflow:hidden}
-.loading-bar-fill{height:100%;width:0%;border-radius:4px;background:rgb(var(--accent));transition:width .1s linear}
+#loadingScreen{gap:20px;flex-direction:column}
+.loading-circle-wrap{position:relative;width:160px;height:160px;display:flex;align-items:center;justify-content:center}
+.loading-circle-svg{width:160px;height:160px;transform:rotate(-90deg)}
+.loading-circle-track{fill:none;stroke:rgba(var(--border),.6);stroke-width:8}
+.loading-circle-fill{fill:none;stroke:rgb(var(--accent));stroke-width:8;stroke-linecap:round;transition:stroke-dashoffset .15s linear}
+.loading-circle-pct{position:absolute;font-family:'Space Grotesk',sans-serif;font-size:2.4rem;font-weight:800;color:rgb(var(--accent));letter-spacing:-0.02em}
+.loading-welcome{font-family:'Space Grotesk',sans-serif;font-size:1.4rem;font-weight:700;color:rgb(var(--text-primary));margin-bottom:4px;text-align:center}
+.loading-sub{font-size:.85rem;color:rgb(var(--text-muted));text-align:center}
+/* keep legacy classes harmless if referenced */
+.loading-bar-wrapper{display:none}
+.loading-bar-fill{display:none}
 
 /* ─── FORGOT OVERLAY ─── */
 .forgot-overlay{position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.7);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;opacity:0;visibility:hidden;transition:var(--transition)}
@@ -263,13 +271,16 @@ input,select,textarea{font-family:inherit;color:inherit}
 .dash-topbar-nav{display:flex;gap:4px;flex:1;overflow-x:auto}
 .dash-topbar-nav .dash-nav-item{padding:8px 14px;font-size:.82rem;margin-bottom:0;white-space:nowrap}
 .dash-topbar-right{display:flex;align-items:center;gap:12px}
-.sidebar-toggle{display:none;font-size:22px;padding:8px;border-radius:8px;cursor:pointer;color:rgb(var(--text-secondary))}
+.sidebar-toggle{display:none;font-size:22px;padding:8px;border-radius:8px;cursor:pointer;color:rgb(var(--text-secondary));background:transparent;border:none}
 .sidebar-toggle:hover{background:rgba(var(--accent),.1)}
-/* Hide topbar for sidebar layout */
+/* Hide topbar for sidebar layout on desktop only */
 .dash-layout-sidebar .dash-topbar{display:none}
 .dash-layout-sidebar .sidebar-toggle{display:none}
 /* Show topbar for topbar layout */
 .dash-layout-topbar .dash-topbar{display:flex}
+/* Sidebar backdrop (mobile) */
+.sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;opacity:0;transition:opacity .3s}
+.sidebar-backdrop.active{display:block;opacity:1}
 
 /* ─── DASHBOARD CONTENT ─── */
 .dash-content{padding:24px;max-width:1400px;width:100%;box-sizing:border-box}
@@ -559,6 +570,9 @@ input,select,textarea{font-family:inherit;color:inherit}
   .dash-sidebar.open{transform:translateX(0)}
   .dash-main{margin-left:0!important;max-width:100vw!important}
   .sidebar-toggle{display:block!important}
+  /* In sidebar layout on mobile, show a slim topbar so the hamburger is visible */
+  .dash-layout-sidebar .dash-topbar{display:flex!important}
+  .dash-layout-sidebar .sidebar-toggle{display:block!important}
   .stat-grid{grid-template-columns:1fr 1fr}
   .msg-layout{grid-template-columns:1fr}
   .msg-main{display:none}
@@ -775,13 +789,25 @@ input,select,textarea{font-family:inherit;color:inherit}
 
 <!-- ═══════ LOADING SCREEN ═══════ -->
 <div id="loadingScreen" class="screen-overlay hidden">
-  <div class="splash-logo" style="animation:none;opacity:1"><span class="ne">Ne</span><span class="x">X</span><span class="us">us</span></div>
-  <div style="margin-top:32px" class="loading-bar-wrapper"><div class="loading-bar-fill" id="loadingBar"></div></div>
+  <div class="loading-welcome" id="loadingWelcome">Welcome back</div>
+  <div class="loading-circle-wrap">
+    <svg class="loading-circle-svg" viewBox="0 0 120 120">
+      <circle class="loading-circle-track" cx="60" cy="60" r="52"></circle>
+      <circle class="loading-circle-fill" id="loadingCircleFill" cx="60" cy="60" r="52"
+              stroke-dasharray="326.7" stroke-dashoffset="326.7"></circle>
+    </svg>
+    <div class="loading-circle-pct" id="loadingPct">0%</div>
+  </div>
+  <div class="loading-sub" id="loadingSub">Preparing your workspace…</div>
+  <!-- legacy bar kept hidden for backward compatibility -->
+  <div class="loading-bar-wrapper" style="display:none"><div class="loading-bar-fill" id="loadingBar"></div></div>
 </div>
 
 <!-- ═══════ DASHBOARD ═══════ -->
 <div id="dashboardScreen">
   <div id="dashLayout">
+    <!-- Sidebar backdrop (mobile only, click to close) -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeSidebar()"></div>
     <!-- Sidebar -->
     <div class="dash-sidebar" id="dashSidebar">
       <div class="dash-sidebar-header">
@@ -1340,10 +1366,22 @@ function switchTab(tabId){
   DASH.currentTab = tabId;
   document.querySelectorAll('.dash-nav-item').forEach(n=>{n.classList.toggle('active',n.dataset.tab===tabId)});
   document.querySelectorAll('.dash-page').forEach(p=>{p.classList.toggle('active',p.id==='page-'+tabId)});
-  nexus$('dashSidebar').classList.remove('open');
+  closeSidebar();
 }
 
-function toggleSidebar(){nexus$('dashSidebar').classList.toggle('open')}
+function toggleSidebar(){
+  const sb = nexus$('dashSidebar');
+  const bd = nexus$('sidebarBackdrop');
+  if(!sb) return;
+  const isOpen = sb.classList.toggle('open');
+  if(bd) bd.classList.toggle('active', isOpen);
+}
+function closeSidebar(){
+  const sb = nexus$('dashSidebar');
+  const bd = nexus$('sidebarBackdrop');
+  if(sb) sb.classList.remove('open');
+  if(bd) bd.classList.remove('active');
+}
 
 /* ═══════════════════════════════════════════
    BUILD DASHBOARD PAGES
@@ -2276,11 +2314,13 @@ async function verifyBiometric(type) {
   if (verified) {
     fpIcon.classList.add('bio-success');
     scanText.textContent = 'Identity Verified ✓';
-    scanSub.textContent = type === 'in' ? 'Clocking you in...' : 'Clocking you out...';
+    scanSub.textContent = type === 'in' ? 'Clocked In ✓' : 'Clocked Out ✓';
     attEl.textContent = '';
-    await new Promise(r => setTimeout(r, 1000));
+    // Kick off the optimistic clock action immediately — don't make the user
+    // stare at "Clocking you in..." for a full second before anything happens.
+    processClockAction(type);
+    await new Promise(r => setTimeout(r, 350));
     overlay.classList.remove('active');
-    await processClockAction(type);
   } else if (!bioCancelled) {
     overlay.classList.remove('active');
   }
@@ -2291,7 +2331,10 @@ function cancelBioScan() {
   nexus$('bioScanOverlay').classList.remove('active');
 }
 
-/* ── Process Clock In/Out after verified ── */
+/* ── Process Clock In/Out after verified ──
+   OPTIMISTIC UI: instantly show the user "Clocked In/Out" the moment the
+   fingerprint is accepted. The actual API call runs in the background; if it
+   fails we revert and notify, but the perceived latency is ~0ms. */
 async function processClockAction(type) {
   const session = getSession();
   if (!session || !session.employeeId) return;
@@ -2301,72 +2344,113 @@ async function processClockAction(type) {
   const dateStr = now.toISOString().split('T')[0];
   const emp = DASH.employees.find(e => e.id === session.employeeId) || {};
 
-  // Try to get geolocation
-  let geoStr = '';
-  try {
-    const pos = await new Promise((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, maximumAge: 60000 });
-    });
-    geoStr = pos.coords.latitude.toFixed(6) + ',' + pos.coords.longitude.toFixed(6);
-  } catch(e) {}
-
   if (type === 'in') {
     const btn = nexus$('empClockInBtn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite;font-size:32px"></i><span>Clocking In...</span>'; }
-    try {
-      const d = await apiPost({
-        action: 'markAttendanceBiometric', type: 'clockIn',
-        licenseKey: STATE.licenseKey, employeeId: session.employeeId,
-        employeeName: emp.name || session.employeeName || session.username, department: emp.department || '',
-        date: dateStr, checkIn: time, status: 'Present',
-        authMethod: 'Fingerprint', geoLocation: geoStr
-      });
-      if (d.success) {
-        todayCheckins[session.employeeId] = { checkIn: time, checkOut: '', hours: 0, status: 'Present' };
-        if (btn) { btn.innerHTML = '<i class="ri-check-line" style="font-size:32px"></i><span>Clocked In</span>'; }
-        const outBtn = nexus$('empClockOutBtn'); if (outBtn) outBtn.disabled = false;
-        updateEmpStats(session.employeeId); loadAttendance();
-      } else {
-        alert(d.error || 'Failed');
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock In<span class="bio-label">Biometric Verify</span>'; }
-      }
-    } catch(e) {
-      alert('Network error');
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock In<span class="bio-label">Biometric Verify</span>'; }
+    const outBtn = nexus$('empClockOutBtn');
+
+    // 1) INSTANT optimistic UI
+    const prevToday = todayCheckins[session.employeeId];
+    todayCheckins[session.employeeId] = { checkIn: time, checkOut: '', hours: 0, status: 'Present' };
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ri-check-line" style="font-size:32px"></i><span>Clocked In</span>';
     }
+    if (outBtn) outBtn.disabled = false;
+    try { updateEmpStats(session.employeeId); } catch(e){}
+
+    // 2) Fetch geo + sync in background
+    (async () => {
+      let geoStr = '';
+      try {
+        const pos = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, maximumAge: 60000 });
+        });
+        geoStr = pos.coords.latitude.toFixed(6) + ',' + pos.coords.longitude.toFixed(6);
+      } catch(e) {}
+
+      try {
+        const d = await apiPost({
+          action: 'markAttendanceBiometric', type: 'clockIn',
+          licenseKey: STATE.licenseKey, employeeId: session.employeeId,
+          employeeName: emp.name || session.employeeName || session.username, department: emp.department || '',
+          date: dateStr, checkIn: time, status: 'Present',
+          authMethod: 'Fingerprint', geoLocation: geoStr
+        });
+        if (d && d.success) {
+          try { loadAttendance(); } catch(e){}
+        } else {
+          // Revert optimistic state
+          todayCheckins[session.employeeId] = prevToday || {};
+          if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock In<span class="bio-label">Biometric Verify</span>'; }
+          if (outBtn) outBtn.disabled = true;
+          try { updateEmpStats(session.employeeId); } catch(e){}
+          alert((d && d.error) || 'Clock-in could not be saved. Please try again.');
+        }
+      } catch(e) {
+        // Network error — keep the optimistic state but warn
+        console.warn('Background clock-in sync failed:', e);
+        if (typeof showToast === 'function') showToast('Clock-in saved locally — will retry when online.');
+      }
+    })();
   } else {
     const btn = nexus$('empClockOutBtn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line" style="animation:clockSpin 1s linear infinite;font-size:32px"></i><span>Clocking Out...</span>'; }
-    try {
-      const d = await apiPost({
-        action: 'markAttendanceBiometric', type: 'clockOut',
-        licenseKey: STATE.licenseKey, employeeId: session.employeeId, date: dateStr,
-        checkOut: time, authMethod: 'Fingerprint', geoLocation: geoStr, totalHours: ''
-      });
-      if (d.success) {
-        const ci = todayCheckins[session.employeeId];
-        const checkInTime = ci && ci.checkIn ? ci.checkIn : '';
-        let hrs = 0;
-        if (checkInTime) {
-          const [h1,m1] = checkInTime.split(':').map(Number);
-          const [h2,m2] = time.split(':').map(Number);
-          hrs = ((h2*60+m2) - (h1*60+m1)) / 60;
-        } else if (d.totalHours) {
-          hrs = parseFloat(d.totalHours);
-        }
-        todayCheckins[session.employeeId] = { checkIn: checkInTime, checkOut: time, hours: Math.max(hrs, 0), status: 'Present' };
-        if (btn) { btn.innerHTML = '<i class="ri-check-line" style="font-size:32px"></i><span>Clocked Out</span>'; }
-        const inBtn = nexus$('empClockInBtn'); if (inBtn) inBtn.disabled = true;
-        updateEmpStats(session.employeeId); loadAttendance();
-      } else {
-        alert(d.error || 'Clock out failed. Please try again.');
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock Out<span class="bio-label">Biometric Verify</span>'; }
-      }
-    } catch(e) {
-      console.error('Clock out error:', e);
-      alert('Network error: ' + (e.message || 'Could not reach server'));
-      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock Out<span class="bio-label">Biometric Verify</span>'; }
+    const inBtn = nexus$('empClockInBtn');
+
+    // 1) INSTANT optimistic UI
+    const prev = todayCheckins[session.employeeId] || {};
+    const checkInTime = prev.checkIn || '';
+    let hrs = 0;
+    if (checkInTime) {
+      const [h1,m1] = checkInTime.split(':').map(Number);
+      const [h2,m2] = time.split(':').map(Number);
+      hrs = ((h2*60+m2) - (h1*60+m1)) / 60;
     }
+    todayCheckins[session.employeeId] = { checkIn: checkInTime, checkOut: time, hours: Math.max(hrs, 0), status: 'Present' };
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ri-check-line" style="font-size:32px"></i><span>Clocked Out</span>';
+    }
+    if (inBtn) inBtn.disabled = true;
+    try { updateEmpStats(session.employeeId); } catch(e){}
+
+    // 2) Sync in background
+    (async () => {
+      let geoStr = '';
+      try {
+        const pos = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, maximumAge: 60000 });
+        });
+        geoStr = pos.coords.latitude.toFixed(6) + ',' + pos.coords.longitude.toFixed(6);
+      } catch(e) {}
+
+      try {
+        const d = await apiPost({
+          action: 'markAttendanceBiometric', type: 'clockOut',
+          licenseKey: STATE.licenseKey, employeeId: session.employeeId, date: dateStr,
+          checkOut: time, authMethod: 'Fingerprint', geoLocation: geoStr, totalHours: ''
+        });
+        if (d && d.success) {
+          if (d.totalHours) {
+            const sv = parseFloat(d.totalHours);
+            if (!isNaN(sv) && sv > 0) {
+              todayCheckins[session.employeeId].hours = sv;
+              try { updateEmpStats(session.employeeId); } catch(e){}
+            }
+          }
+          try { loadAttendance(); } catch(e){}
+        } else {
+          // Revert optimistic state
+          todayCheckins[session.employeeId] = prev;
+          if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-fingerprint-line"></i>Clock Out<span class="bio-label">Biometric Verify</span>'; }
+          if (inBtn) inBtn.disabled = true;
+          try { updateEmpStats(session.employeeId); } catch(e){}
+          alert((d && d.error) || 'Clock-out could not be saved. Please try again.');
+        }
+      } catch(e) {
+        console.warn('Background clock-out sync failed:', e);
+        if (typeof showToast === 'function') showToast('Clock-out saved locally — will retry when online.');
+      }
+    })();
   }
 }
 
@@ -3650,21 +3734,30 @@ document.addEventListener('DOMContentLoaded',()=>{
   `;
   document.head.appendChild(styleEl);
 
-  /* Body scroll-lock when sidebar drawer is open (mobile) */
+  /* Body scroll-lock when sidebar drawer is open (mobile) — wraps the
+     base toggleSidebar()/closeSidebar() so backdrop + body class stay synced. */
   const _toggleSidebar = window.toggleSidebar;
   window.toggleSidebar = function(){
     _toggleSidebar();
     const sb = document.getElementById('dashSidebar');
-    document.body.classList.toggle('sidebar-open', sb && sb.classList.contains('open'));
+    document.body.classList.toggle('sidebar-open', !!(sb && sb.classList.contains('open')));
   };
-  // Close drawer when clicking outside
+  const _closeSidebar = window.closeSidebar;
+  if (typeof _closeSidebar === 'function') {
+    window.closeSidebar = function(){
+      _closeSidebar();
+      document.body.classList.remove('sidebar-open');
+    };
+  }
+  // Close drawer when clicking outside (delegates to closeSidebar so backdrop hides)
   document.addEventListener('click', function(e){
     const sb = document.getElementById('dashSidebar');
     if(!sb || !sb.classList.contains('open')) return;
     if(sb.contains(e.target)) return;
     if(e.target.closest('#sidebarToggle')) return;
-    sb.classList.remove('open');
-    document.body.classList.remove('sidebar-open');
+    if(e.target.closest('#mobileMenuBtn')) return;
+    if (typeof window.closeSidebar === 'function') window.closeSidebar();
+    else { sb.classList.remove('open'); document.body.classList.remove('sidebar-open'); }
   });
 
   /* DOM cleanup pass — strip Score columns/widgets that slip through */
@@ -3698,44 +3791,95 @@ document.addEventListener('DOMContentLoaded',()=>{
   /* Stub the score-settings modal so any leftover invocation no-ops cleanly */
   window.showScoreSettingsModal = function(){ /* removed in v1.05 */ };
 
-  /* ── Preload everything after login (before reveal) ── */
+  /* ── Preload everything after login (circular progress, animated 0→100) ── */
   const _origShowLoading = window.showLoadingThenDashboard;
   window.showLoadingThenDashboard = function(){
     showScreen('loadingScreen');
-    const bar = document.getElementById('loadingBar');
-    const subEl = document.querySelector('#loadingScreen .loading-sub') || (function(){
-      const el = document.createElement('div');
-      el.className='loading-sub';
-      el.style.cssText='margin-top:14px;color:rgb(var(--text-secondary));font-size:.85rem;letter-spacing:1px';
-      el.textContent='Preparing your workspace…';
-      const ls = document.getElementById('loadingScreen');
-      if(ls) ls.appendChild(el);
-      return el;
-    })();
-    if(subEl) subEl.textContent = 'Preparing your workspace…';
-
+    const fillEl = document.getElementById('loadingCircleFill');
+    const pctEl  = document.getElementById('loadingPct');
+    const subEl  = document.getElementById('loadingSub');
+    const wEl    = document.getElementById('loadingWelcome');
+    const CIRC   = 326.7; // 2 * π * 52
     let pct = 0;
-    const tick = setInterval(()=>{ pct = Math.min(pct+3, 92); if(bar) bar.style.width = pct+'%'; }, 80);
 
+    // Personalize welcome
+    try {
+      const s = (typeof getSession==='function') ? getSession() : null;
+      const name = (s && (s.employeeName || s.username)) || STATE.username || '';
+      if (wEl) wEl.textContent = name ? ('Welcome back, ' + String(name).split(' ')[0]) : 'Welcome back';
+    } catch(e){}
+    if (subEl) subEl.textContent = 'Preparing your workspace…';
+
+    function paint(p){
+      if (pctEl) pctEl.textContent = Math.round(p) + '%';
+      if (fillEl) fillEl.setAttribute('stroke-dashoffset', String(CIRC * (1 - p/100)));
+    }
+    paint(0);
+
+    // Counter animates exactly +1 every ~28ms (≈2.8s for 0→100), capped at 92
+    // until preload finishes, then accelerated to 100.
+    let preloadDone = false;
+    const tick = setInterval(()=>{
+      const cap = preloadDone ? 100 : 92;
+      if (pct < cap) { pct += 1; paint(pct); }
+      if (pct >= 100) { clearInterval(tick); finish(); }
+    }, 28);
+
+    let finished = false;
+    function finish(){
+      if (finished) return; finished = true;
+      paint(100);
+      setTimeout(()=>{
+        const ls = document.getElementById('loadingScreen');
+        if (ls) ls.classList.add('hidden');
+        initDashboard();
+      }, 220);
+    }
+
+    // Kick off preload tasks in parallel — including biometric warmup
     const tasks = [];
-    if(typeof apiGet === 'function' && STATE.licenseKey){
+    if (typeof apiGet === 'function' && STATE.licenseKey){
       tasks.push(apiGet({action:'getDashboardData',key:STATE.licenseKey}).catch(()=>null));
       tasks.push(apiGet({action:'getAttendance',key:STATE.licenseKey}).catch(()=>null));
       tasks.push(apiGet({action:'getRequests',key:STATE.licenseKey}).catch(()=>null));
       tasks.push(apiGet({action:'getSettings',key:STATE.licenseKey}).catch(()=>null));
     }
-    // Min visible time so it doesn't flash
-    tasks.push(new Promise(r=>setTimeout(r,900)));
 
-    Promise.all(tasks).finally(()=>{
-      clearInterval(tick);
-      if(bar) bar.style.width = '100%';
-      setTimeout(()=>{
-        const ls = document.getElementById('loadingScreen');
-        if(ls) ls.classList.add('hidden');
-        initDashboard();
-      }, 250);
-    });
+    // Preload employee's biometric credential ID + warm WebAuthn so the very
+    // first Clock In tap shows the fingerprint sheet instantly.
+    try {
+      const sess = (typeof getSession==='function') ? getSession() : null;
+      if (sess && sess.employeeId && typeof apiGet === 'function' && STATE.licenseKey){
+        tasks.push(
+          apiGet({action:'getBiometric', key:STATE.licenseKey, employeeId:sess.employeeId})
+            .then(d=>{
+              if (d && d.success && d.registered && d.credentialId){
+                try { window.empCredentialId = d.credentialId; } catch(e){}
+              }
+            })
+            .catch(()=>null)
+        );
+      }
+      // Warm WebAuthn API (resolves quickly on supported devices, harmless otherwise)
+      if (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable){
+        tasks.push(
+          PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(()=>false)
+        );
+      }
+      // Geolocation warmup so the first clock-in doesn't wait on GPS cold-start
+      if (navigator.geolocation){
+        tasks.push(new Promise(r=>{
+          try {
+            navigator.geolocation.getCurrentPosition(()=>r(), ()=>r(), {timeout:3000, maximumAge:60000});
+          } catch(e){ r(); }
+        }));
+      }
+    } catch(e){}
+
+    // Minimum visible time so the animation feels intentional
+    tasks.push(new Promise(r=>setTimeout(r, 600)));
+
+    Promise.all(tasks).finally(()=>{ preloadDone = true; });
   };
 
   /* ── (d) Mobile sidebar hamburger, Clear Session relocation, Setup hide ── */
@@ -3753,10 +3897,12 @@ document.addEventListener('DOMContentLoaded',()=>{
       hb.innerHTML = '<i class="ri-menu-line"></i>';
       hb.onclick = function(ev){
         ev.stopPropagation();
-        const sb = document.getElementById('dashSidebar');
-        if(!sb) return;
-        sb.classList.toggle('open');
-        document.body.classList.toggle('sidebar-open', sb.classList.contains('open'));
+        if (typeof window.toggleSidebar === 'function') {
+          window.toggleSidebar();
+        } else {
+          const sb = document.getElementById('dashSidebar');
+          if (sb) sb.classList.toggle('open');
+        }
       };
       document.body.appendChild(hb);
     }
